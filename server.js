@@ -51,10 +51,10 @@ async function identify(token) {
     const ur = await fetch(SB_URL + '/auth/v1/user', { headers: H, signal: sig() });
     if (ur.status === 401 || ur.status === 403) return null; if (!ur.ok) return undefined;
     const u = await ur.json(); if (!u || !u.id) return null;
-    const pr = await fetch(`${SB_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(u.id)}&select=name,avatar`, { headers: H, signal: sig() });
+    const pr = await fetch(`${SB_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(u.id)}&select=username,avatar`, { headers: H, signal: sig() });
     if (!pr.ok) return undefined;
     const rows = await pr.json(); if (!Array.isArray(rows) || !rows[0]) return null;
-    const id = { uid: String(u.id), name: clean(rows[0].name, 20), av: cleanAv(rows[0].avatar || '') };
+    const id = { uid: String(u.id), name: clean(rows[0].username, 20), av: cleanAv(rows[0].avatar || '') };
     if (!id.name) return null;
     if (idCache.size > 500) idCache.clear(); idCache.set(token, { id, t: Date.now() }); return id;
   } catch { return undefined; }
