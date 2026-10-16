@@ -227,10 +227,23 @@ async function onMessage(ws, raw) {
 
   if (m.t === 'join') {
     if (limited(ws.ip)) return err(ws, 'Too many attempts. Wait a minute.');
-    const r = rooms.get(clean(m.code, 8).toUpperCase());
-    if (!r) return err(ws, 'Invalid room code, or the room has expired.');
-    if (r.failed >= 30) return err(ws, 'Room is temporarily locked after too many wrong passwords.');
-    if (!checkPw(r, String(m.password || ''))) { r.failed++; return err(ws, 'Incorrect password.'); }
+    const pwIn = String(m.password || '');
+    let r = null;
+    if (m.code) {
+      r = rooms.get(clean(m.code, 8).toUpperCase());
+      if (!r) return err(ws, 'Invalid room link, or the room has expired.');
+      if (r.failed >= 30) return err(ws, 'Room is temporarily locked after too many wrong passwords.');
+      if (!checkPw(r, pwIn)) { r.failed++; return err(ws, 'Incorrect password.'); }
+    } else {
+      const nm = clean(m.roomName, 30).toLowerCase();
+      if (!nm) return err(ws, 'Enter the room name.');
+      const same = [...rooms.values()].filter(x => x.name.toLowerCase() === nm);
+      if (!same.length) return err(ws, 'No room found with that name.');
+      const open = same.filter(x => x.failed < 30);
+      if (!open.length) return err(ws, 'Room is temporarily locked after too many wrong passwords.');
+      r = open.find(x => checkPw(x, pwIn));
+      if (!r) { open.forEach(x => x.failed++); return err(ws, 'Incorrect password.'); }
+    }
     const who = await identify(m.token);
     if (who === undefined) return err(ws, 'Account service is not reachable. Try again in a moment.');
     if (!who) return err(ws, 'Please log in again.');
