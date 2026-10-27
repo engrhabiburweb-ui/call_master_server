@@ -62,15 +62,30 @@ function validateDeck(d) {
   if (z.length !== 1 || z[0].value !== 0 || z[0].pts !== 0) throw new Error('Bad 0 card');
 }
 const byValue = (a, b) => a.value - b.value;
-/* Deal 5 each. A deal is re-shuffled until every hand holds at least one card >= minTopStrength. */
-function deal(rng) {
-  for (let tries = 0; tries < 10000; tries++) {
+/* Deal 5 each. Rules kept: every hand holds at least one card >= minTopStrength (red 6).
+   Fair shuffle: many valid random deals are drawn, and the one that keeps all four players' hand strength
+   closest to equal (also counting how lucky / unlucky each seat has been in the earlier rounds of the match)
+   is chosen from the best few. So nobody gets weak hands again and again, and nobody gets strong ones again and again.
+   `luck` is an array of 4 numbers kept by the caller for the whole match; it is updated here. */
+function deal(rng, luck) {
+  const cands = [];
+  for (let tries = 0; tries < 10000 && cands.length < 24; tries++) {
     const d = shuffle(buildDeck(), rng);
     validateDeck(d);
     const hands = [0, 1, 2, 3].map(p => d.slice(p * 5, p * 5 + 5));
-    if (hands.every(h => h.some(c => RULES.strength(c) >= RULES.minTopStrength))) return hands.map(h => h.sort(byValue));
+    if (!hands.every(h => h.some(c => RULES.strength(c) >= RULES.minTopStrength))) continue;
+    const pw = hands.map(predictCapture), mean = (pw[0] + pw[1] + pw[2] + pw[3]) / 4;
+    let cost = 0;
+    for (let p = 0; p < 4; p++) { const x = (pw[p] - mean) + (luck ? luck[p] : 0); cost += x * x; }
+    const sp = Math.max(...pw) - Math.min(...pw); cost += 0.4 * sp * sp;
+    cands.push({ hands, pw, mean, cost });
+    if (!luck && cands.length >= 12) break;
   }
-  throw new Error('Could not deal a valid hand');
+  if (!cands.length) throw new Error('Could not deal a valid hand');
+  cands.sort((a, b) => a.cost - b.cost);
+  const pick = cands[Math.floor(rng() * Math.min(4, cands.length))];
+  if (luck) for (let p = 0; p < 4; p++) luck[p] = (luck[p] || 0) * 0.9 + (pick.pw[p] - pick.mean);
+  return pick.hands.map(h => h.sort(byValue));
 }
 
 /* ================= CALL ENGINE (every player makes one call) ================= */
@@ -130,6 +145,8 @@ function view(st, p) {
            sizes: st.hands.map(h => h.length), calls: st.calls.slice(), cap: st.cap.slice(), leader: st.leader, log: (st.log || []).slice() };
 }
 const PERS = ['aggressive', 'defensive', 'balanced'];
+/* Computer players (same order as AI_BASE below): all three play like experts and go for the kill. */
+const AI_PERS = ['aggressive', 'aggressive', 'aggressive'], AI_LEVEL = ['expert', 'expert', 'expert'];
 /* Computer players are Tanim, Rakib and Saidy. If the human is called one of those, that computer player
    is renamed (Limon, then Rimon) so two people never share a name. */
 const AI_BASE = ['Tanim', 'Rakib', 'Saidy'], AI_SUBS = ['Limon', 'Rimon'];
@@ -260,7 +277,7 @@ function normCtx(ctx) {
 function weightsFor(me, calls, ctx, lv, pers) {
   const H = ctx.humans, tot = ctx.totals, u = [0, 0, 0, 0], others = [0, 1, 2, 3].filter(p => p !== me);
   const maxCall = Math.max(...others.map(p => calls[p] || 0)), maxTot = Math.max(...others.map(p => tot[p] || 0));
-  const aggr = pers === 'aggressive' ? 1.15 : pers === 'defensive' ? 0.9 : 1, def = pers === 'defensive' ? 1.2 : 1;
+  const aggr = pers === 'aggressive' ? 1.3 : pers === 'defensive' ? 0.9 : 1, def = pers === 'defensive' ? 1.2 : 1;
   const teamMode = H.length > 0 && !H.includes(me);
   for (const p of others) {
     if (teamMode) {
@@ -326,9 +343,9 @@ function searchPlay(v, lv, pers, rng, ctx) {
   const me = v.me, hand = v.hand, un = unseenCards(v), others = [0, 1, 2, 3].filter(p => p !== me);
   const u = weightsFor(me, v.calls, ctx, lv, pers), pb = playedByCards(v);
   const topDone = pb.map(a => a.some(c => RULES.strength(c) >= RULES.minTopStrength));
-  const score = hand.map(() => 0); let wsum = 0; const t0 = Date.now();
+  const score = hand.map(() => 0), ful = hand.map(() => 0); let wsum = 0; const t0 = Date.now();
   for (let s = 0; s < lv.N; s++) {
-    if (s >= 24 && Date.now() - t0 > 400) break;
+    if (s >= 16 && Date.now() - t0 > 250) break;
     const hands = sampleHands(v, un, others, topDone, rng);
     const w = lv.infer ? plausibility(v.calls, hands, pb, others, ctx, me) : 1;
     if (w < 1e-6) continue;
@@ -337,11 +354,21 @@ function searchPlay(v, lv, pers, rng, ctx) {
                    leader: v.leader, turn: me, calls: v.calls.slice(), played: v.played.slice(), log: [] };
       playCard(st, me, hand[i].id); rollout(st);
       score[i] += w * utility(st, me, u);
+      if (st.cap[me] >= st.calls[me]) ful[i] += w;
     }
     wsum += w;
   }
   if (!wsum) return smartPlay(v, pers);
   let bi = 0; for (let i = 1; i < hand.length; i++) if (score[i] > score[bi]) bi = i;
+  /* My own call is already made (or almost certainly will be): my own points no longer matter, so among the
+     moves that are about equally good I spend the SMALLEST card and keep the biggest ones to take points
+     away from the players who are still chasing their call. */
+  if (v.cap[me] >= v.calls[me] || ful[bi] / wsum >= 0.85) {
+    const eps = 0.02 * wsum; let best = bi;
+    for (let i = 0; i < hand.length; i++)
+      if (score[i] >= score[bi] - eps && RULES.strength(hand[i]) < RULES.strength(hand[best])) best = i;
+    bi = best;
+  }
   return hand[bi];
 }
 
@@ -353,7 +380,7 @@ function searchBid(hand, b, lv, pers, rng, ctx) {
   for (let c = RULES.minCall; c <= hi; c += RULES.step) cands.push(c);
   const score = cands.map(() => 0); let wsum = 0; const t0 = Date.now();
   for (let s = 0; s < lv.bidN; s++) {
-    if (s >= 24 && Date.now() - t0 > 600) break;
+    if (s >= 16 && Date.now() - t0 > 350) break;
     const v = { me, hand, sizes: [5, 5, 5, 5], played: [], log: [] };
     const hands = sampleHands(v, un, others, [false, false, false, false], rng);
     const w = lv.infer ? plausibility(b.calls, hands, null, others, ctx, me) : 1;
@@ -396,7 +423,7 @@ function simulateRound(seed, levels, pers, start, ctx) {
 }
 
 const CM = { RULES, mulberry32, shuffle, buildDeck, validateDeck, deal, legalBids, newBidding, placeBid,
-  newPlayState, trickWinner, playCard, isOver, scoreRound, view, aiBid, aiPlay, simulateRound, predictCapture, heurPlay, smartPlay, basicPlay, aiNames, PERS, heurBid, LV };
+  newPlayState, trickWinner, playCard, isOver, scoreRound, view, aiBid, aiPlay, simulateRound, predictCapture, heurPlay, smartPlay, basicPlay, aiNames, PERS, AI_PERS, AI_LEVEL, heurBid, LV };
 if (typeof module !== 'undefined' && module.exports) module.exports = CM;
 root.CM = CM;
 })(typeof window !== 'undefined' ? window : globalThis);

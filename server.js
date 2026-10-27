@@ -17,8 +17,8 @@ const MIME = { html: 'text/html', js: 'text/javascript', webmanifest: 'applicati
 const TIMING = { bidDone: 1500, autoAct: 12000, roundAuto: 25000, callMs: 40000, ...(global.__CM_TIMING || {}) };   // 40 s to call, then auto-call 15
 const MAX_ROUNDS = 20;
 /* Empty seats are filled with expert AI players when the host starts a match with 2 or 3 humans. They act after a human-like pause. */
-const BOT = { bid: [1200, 2200], play: [900, 1700], shuffle: 1300, trickGap: 1500, ...(global.__CM_BOT || {}) };
-const BOT_PERS = ['aggressive', 'defensive', 'balanced'];
+const BOT = { bid: [500, 1000], play: [350, 750], shuffle: 700, trickGap: 800, ...(global.__CM_BOT || {}) };
+/* every bot is an expert + aggressive player */
 const pause = ([a, b]) => a + Math.random() * (b - a);
 /* Accounts live in Supabase. The browser sends its login token; the server asks Supabase who it belongs to
    and uses the NAME and PHOTO from that player's profile — a client can never claim someone else's name. */
@@ -101,13 +101,13 @@ function doPlay(r, s, cardId) {
 function fillBots(r) {
   const taken = new Set(r.seats.filter(Boolean).map(x => x.name.toLowerCase()));
   const first = r.seats.find(x => x && !x.bot);
-  const pool = CM.aiNames(first ? first.name : '').filter(n => !taken.has(n.toLowerCase()));
+  const base = CM.aiNames(first ? first.name : ''), pool = base.filter(n => !taken.has(n.toLowerCase()));
   let k = 0;
   for (let i = 0; i < 4; i++) if (!r.seats[i]) {
     let name = pool[k] || ('AI ' + (k + 1)); k++;
     while (taken.has(name.toLowerCase())) name += '2';
     taken.add(name.toLowerCase());
-    r.seats[i] = { name, uid: null, av: '', token: crypto.randomBytes(16).toString('hex'), ready: true, ws: null, connected: true, bot: true, pers: BOT_PERS[(k - 1) % 3] };
+    r.seats[i] = { name, uid: null, av: '', token: crypto.randomBytes(16).toString('hex'), ready: true, ws: null, connected: true, bot: true, pers: 'aggressive', lvl: 'expert' };
   }
 }
 function dropBots(r) { r.seats = r.seats.map(x => x && x.bot ? null : x); }
@@ -115,8 +115,8 @@ function botAct(r, s) {
   const seat = r.seats[s]; if (!seat || !seat.bot) return;
   try {
     if (r.phase === 'shuffle' && r.dealer === s) return dealNow(r);
-    if (r.phase === 'bidding' && r.b.turn === s) { CM.placeBid(r.b, s, CM.aiBid(r.hands[s], r.b, 'expert', seat.pers, crng, botCtx(r)).value); return afterAction(r); }
-    if (r.phase === 'playing' && r.st.turn === s) { doPlay(r, s, CM.aiPlay(CM.view(r.st, s), 'expert', seat.pers, crng, botCtx(r)).id); return afterAction(r); }
+    if (r.phase === 'bidding' && r.b.turn === s) { CM.placeBid(r.b, s, CM.aiBid(r.hands[s], r.b, seat.lvl || 'expert', seat.pers, crng, botCtx(r)).value); return afterAction(r); }
+    if (r.phase === 'playing' && r.st.turn === s) { doPlay(r, s, CM.aiPlay(CM.view(r.st, s), seat.lvl || 'expert', seat.pers, crng, botCtx(r)).id); return afterAction(r); }
   } catch (e) { if (process.env.CM_DEBUG) console.error('bot error', e.message); }
 }
 
@@ -130,7 +130,7 @@ function startRound(r) {
   broadcast(r); schedule(r);
 }
 function dealNow(r) {
-  r.hands = CM.deal(crng); r.b = CM.newBidding((r.dealer + 1) % 4); r.phase = 'bidding'; broadcast(r); schedule(r);
+  r.luck = r.luck || [0, 0, 0, 0]; r.hands = CM.deal(crng, r.luck); r.b = CM.newBidding((r.dealer + 1) % 4); r.phase = 'bidding'; broadcast(r); schedule(r);
 }
 function startPlay(r) {
   r.st = CM.newPlayState(r.hands, r.b.calls, (r.dealer + 1) % 4);     // the player after the dealer leads
@@ -287,7 +287,7 @@ async function onMessage(ws, raw) {
           if (!hs.every(x => x.connected)) return err(ws, 'Every player must be connected.');
           if (!hs.every(x => x.ready)) return err(ws, 'Everyone must be ready.');
           fillBots(r); }                                                  // empty seats become expert AI players
-        r.scores = [0, 0, 0, 0]; r.hist = []; r.round = 0; return startRound(r);
+        r.scores = [0, 0, 0, 0]; r.hist = []; r.round = 0; r.luck = [0, 0, 0, 0]; return startRound(r);
       case 'shuffle':
         if (r.phase !== 'shuffle') return err(ws, 'Not shuffling now.');
         if (s !== r.dealer) return err(ws, 'Only the dealer can shuffle.');
